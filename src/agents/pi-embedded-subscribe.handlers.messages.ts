@@ -82,27 +82,6 @@ export function handleMessageUpdate(
       : undefined;
   const evtType = typeof assistantRecord?.type === "string" ? assistantRecord.type : "";
 
-  // Track native thinking blocks to suppress pre-thinking text blocks from block streaming.
-  // Some API proxies (e.g. pincc) may place thinking content in a text block that precedes
-  // the actual thinking block.  Detect this pattern and suppress block-reply emission for
-  // text blocks that arrive before the first thinking block in the current message.
-  // Only apply when thinking is enabled (thinkLevel !== "off") to avoid suppressing
-  // legitimate text blocks for non-thinking models.
-  const expectsThinking = (ctx.params.thinkLevel ?? "off") !== "off";
-
-  if (evtType === "thinking_start" || evtType === "thinking_delta") {
-    ctx.state.seenThinkingBlock = true;
-    ctx.state.preThinkingTextBlock = false; // any active pre-thinking text block is now over
-    return;
-  }
-
-  if (evtType === "text_start" && expectsThinking && !ctx.state.seenThinkingBlock) {
-    // A text block started before any thinking block — flag it as potentially leaked thinking.
-    ctx.state.preThinkingTextBlock = true;
-  } else if (evtType === "text_start") {
-    ctx.state.preThinkingTextBlock = false;
-  }
-
   if (evtType !== "text_delta" && evtType !== "text_start" && evtType !== "text_end") {
     return;
   }
@@ -141,14 +120,10 @@ export function handleMessageUpdate(
 
   if (chunk) {
     ctx.state.deltaBuffer += chunk;
-    // Skip block-reply buffering for text blocks that precede the first thinking block.
-    // These may contain leaked thinking content from proxies that reorder content blocks.
-    if (!ctx.state.preThinkingTextBlock) {
-      if (ctx.blockChunker) {
-        ctx.blockChunker.append(chunk);
-      } else {
-        ctx.state.blockBuffer += chunk;
-      }
+    if (ctx.blockChunker) {
+      ctx.blockChunker.append(chunk);
+    } else {
+      ctx.state.blockBuffer += chunk;
     }
   }
 
@@ -221,10 +196,7 @@ export function handleMessageUpdate(
   }
 
   if (evtType === "text_end" && ctx.state.blockReplyBreak === "text_end") {
-    // When a pre-thinking text block ends, clear the flag but don't emit block replies.
-    if (ctx.state.preThinkingTextBlock) {
-      ctx.state.preThinkingTextBlock = false;
-    } else if (ctx.blockChunker?.hasBuffered()) {
+    if (ctx.blockChunker?.hasBuffered()) {
       ctx.blockChunker.drain({ force: true, emit: ctx.emitBlockChunk });
       ctx.blockChunker.reset();
     } else if (ctx.state.blockBuffer.length > 0) {

@@ -58,10 +58,6 @@ export type EmbeddedPiSubscribeState = {
   lastAssistantTextTrimmed?: string;
   assistantTextBaseline: number;
   suppressBlockChunks: boolean;
-  /** Set when a native thinking block is seen in the current assistant message. */
-  seenThinkingBlock: boolean;
-  /** True while streaming a text block that appeared before the first thinking block. */
-  preThinkingTextBlock: boolean;
   lastReasoningSent?: string;
 
   compactionInFlight: boolean;
