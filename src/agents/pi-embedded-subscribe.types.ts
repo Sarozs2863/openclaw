@@ -1,5 +1,5 @@
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
-import type { ReasoningLevel, VerboseLevel } from "../auto-reply/thinking.js";
+import type { ReasoningLevel, ThinkLevel, VerboseLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { HookRunner } from "../plugins/hooks.js";
 import type { BlockReplyChunking } from "./pi-embedded-block-chunker.js";
@@ -12,6 +12,8 @@ export type SubscribeEmbeddedPiSessionParams = {
   hookRunner?: HookRunner;
   verboseLevel?: VerboseLevel;
   reasoningMode?: ReasoningLevel;
+  /** The thinking level for the current run (e.g. "off", "high"). Used to detect pre-thinking text blocks. */
+  thinkLevel?: ThinkLevel;
   toolResultFormat?: ToolResultFormat;
   shouldEmitToolResult?: () => boolean;
   shouldEmitToolOutput?: () => boolean;

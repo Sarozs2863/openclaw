@@ -86,16 +86,20 @@ export function handleMessageUpdate(
   // Some API proxies (e.g. pincc) may place thinking content in a text block that precedes
   // the actual thinking block.  Detect this pattern and suppress block-reply emission for
   // text blocks that arrive before the first thinking block in the current message.
+  // Only apply when thinking is enabled (thinkLevel !== "off") to avoid suppressing
+  // legitimate text blocks for non-thinking models.
+  const expectsThinking = (ctx.params.thinkLevel ?? "off") !== "off";
+
   if (evtType === "thinking_start" || evtType === "thinking_delta") {
     ctx.state.seenThinkingBlock = true;
     ctx.state.preThinkingTextBlock = false; // any active pre-thinking text block is now over
     return;
   }
 
-  if (evtType === "text_start" && !ctx.state.seenThinkingBlock) {
+  if (evtType === "text_start" && expectsThinking && !ctx.state.seenThinkingBlock) {
     // A text block started before any thinking block — flag it as potentially leaked thinking.
     ctx.state.preThinkingTextBlock = true;
-  } else if (evtType === "text_start" && ctx.state.seenThinkingBlock) {
+  } else if (evtType === "text_start") {
     ctx.state.preThinkingTextBlock = false;
   }
 
