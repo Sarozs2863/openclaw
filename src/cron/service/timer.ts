@@ -456,6 +456,53 @@ async function executeJobCore(
   state: CronServiceState,
   job: CronJob,
 ): Promise<CronRunOutcome & CronRunTelemetry> {
+  // Direct exec: run shell command without LLM
+  if (job.payload.kind === "exec") {
+    const { exec: execCb } = await import("node:child_process");
+    const command = job.payload.command;
+    const cwd = job.payload.cwd || undefined;
+    const timeoutMs = job.payload.timeoutMs || 60_000;
+    const env = job.payload.env ? { ...process.env, ...job.payload.env } : undefined;
+
+    return new Promise<CronRunOutcome & CronRunTelemetry>((resolve) => {
+      execCb(
+        command,
+        {
+          cwd,
+          timeout: timeoutMs,
+          env,
+          encoding: "utf-8",
+          maxBuffer: 1024 * 1024,
+        },
+        (err, stdout, stderr) => {
+          if (err) {
+            const stderrStr = stderr ? String(stderr).trim().slice(0, 1000) : "";
+            const stdoutStr = stdout ? String(stdout).trim().slice(0, 1000) : "";
+            const exitCode =
+              typeof (err as unknown as { code?: unknown }).code === "number"
+                ? (err as unknown as { code: number }).code
+                : null;
+            const errorMsg =
+              exitCode !== null
+                ? `exit code ${exitCode}${stderrStr ? `: ${stderrStr}` : ""}`
+                : String(err.message ?? err);
+            resolve({
+              status: "error",
+              error: errorMsg,
+              summary: stdoutStr || stderrStr || errorMsg,
+            });
+            return;
+          }
+          const summary = typeof stdout === "string" ? stdout.trim().slice(0, 2000) : "";
+          resolve({
+            status: "ok",
+            summary: summary || "(exec completed with no output)",
+          });
+        },
+      );
+    });
+  }
+
   if (job.sessionTarget === "main") {
     const text = resolveJobPayloadTextForMain(job);
     if (!text) {

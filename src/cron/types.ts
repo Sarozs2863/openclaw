@@ -65,6 +65,13 @@ export type CronPayload =
       channel?: CronMessageChannel;
       to?: string;
       bestEffortDeliver?: boolean;
+    }
+  | {
+      kind: "exec";
+      command: string;
+      cwd?: string;
+      timeoutMs?: number;
+      env?: Record<string, string>;
     };
 
 export type CronPayloadPatch =
@@ -80,6 +87,13 @@ export type CronPayloadPatch =
       channel?: CronMessageChannel;
       to?: string;
       bestEffortDeliver?: boolean;
+    }
+  | {
+      kind: "exec";
+      command?: string;
+      cwd?: string;
+      timeoutMs?: number;
+      env?: Record<string, string>;
     };
 
 export type CronJobState = {

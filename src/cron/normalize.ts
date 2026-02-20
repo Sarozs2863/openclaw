@@ -81,12 +81,15 @@ function coercePayload(payload: UnknownRecord) {
     next.kind = "agentTurn";
   } else if (kindRaw === "systemevent") {
     next.kind = "systemEvent";
+  } else if (kindRaw === "exec") {
+    next.kind = "exec";
   } else if (kindRaw) {
     next.kind = kindRaw;
   }
   if (!next.kind) {
     const hasMessage = typeof next.message === "string" && next.message.trim().length > 0;
     const hasText = typeof next.text === "string" && next.text.trim().length > 0;
+    const hasCommand = typeof next.command === "string" && next.command.trim().length > 0;
     const hasAgentTurnHint =
       typeof next.model === "string" ||
       typeof next.thinking === "string" ||
@@ -96,6 +99,8 @@ function coercePayload(payload: UnknownRecord) {
       next.kind = "agentTurn";
     } else if (hasText) {
       next.kind = "systemEvent";
+    } else if (hasCommand) {
+      next.kind = "exec";
     } else if (hasAgentTurnHint) {
       // Accept partial agentTurn payload patches that only tweak agent-turn-only fields.
       next.kind = "agentTurn";
@@ -278,6 +283,7 @@ function stripLegacyTopLevelFields(next: UnknownRecord) {
   delete next.allowUnsafeExternalContent;
   delete next.message;
   delete next.text;
+  delete next.command;
   delete next.deliver;
   delete next.channel;
   delete next.to;
@@ -363,10 +369,13 @@ export function normalizeCronJobInput(
   if (!("payload" in next) || !isRecord(next.payload)) {
     const message = typeof next.message === "string" ? next.message.trim() : "";
     const text = typeof next.text === "string" ? next.text.trim() : "";
+    const command = typeof next.command === "string" ? next.command.trim() : "";
     if (message) {
       next.payload = { kind: "agentTurn", message };
     } else if (text) {
       next.payload = { kind: "systemEvent", text };
+    } else if (command) {
+      next.payload = { kind: "exec", command };
     }
   }
 
@@ -417,6 +426,9 @@ export function normalizeCronJobInput(
         next.sessionTarget = "main";
       }
       if (kind === "agentTurn") {
+        next.sessionTarget = "isolated";
+      }
+      if (kind === "exec") {
         next.sessionTarget = "isolated";
       }
     }
