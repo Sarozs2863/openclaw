@@ -429,6 +429,9 @@ export function normalizeCronJobInput(
         next.sessionTarget = "isolated";
       }
       if (kind === "exec") {
+        // exec jobs bypass the session system entirely (handled directly in
+        // executeJobCore), but sessionTarget is required by the schema.
+        // "isolated" is used as a convention; the value is never consumed.
         next.sessionTarget = "isolated";
       }
     }

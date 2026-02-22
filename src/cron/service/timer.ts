@@ -1,3 +1,4 @@
+import { exec as execCb } from "node:child_process";
 import type { HeartbeatRunResult } from "../../infra/heartbeat-wake.js";
 import { DEFAULT_AGENT_ID } from "../../routing/session-key.js";
 import { resolveCronDeliveryPlan } from "../delivery.js";
@@ -34,10 +35,18 @@ const DEFAULT_JOB_TIMEOUT_MS = 10 * 60_000; // 10 minutes
 type TimedCronRunOutcome = CronRunOutcome &
   CronRunTelemetry & {
     jobId: string;
+    delivered?: boolean;
     startedAt: number;
     endedAt: number;
   };
 
+function resolveRunConcurrency(state: CronServiceState): number {
+  const raw = state.deps.cronConfig?.maxConcurrentRuns;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return 1;
+  }
+  return Math.max(1, Math.floor(raw));
+}
 /**
  * Exponential backoff delays (in ms) indexed by consecutive error count.
  * After the last entry the delay stays constant.
@@ -66,6 +75,7 @@ function applyJobResult(
   result: {
     status: CronRunStatus;
     error?: string;
+    delivered?: boolean;
     startedAt: number;
     endedAt: number;
   },
@@ -75,6 +85,7 @@ function applyJobResult(
   job.state.lastStatus = result.status;
   job.state.lastDurationMs = Math.max(0, result.endedAt - result.startedAt);
   job.state.lastError = result.error;
+  job.state.lastDelivered = result.delivered;
   job.updatedAtMs = result.endedAt;
 
   // Track consecutive errors for backoff / auto-disable.
@@ -236,9 +247,11 @@ export async function onTimer(state: CronServiceState) {
       }));
     });
 
-    const results: TimedCronRunOutcome[] = [];
-
-    for (const { id, job } of dueJobs) {
+    const runDueJob = async (params: {
+      id: string;
+      job: CronJob;
+    }): Promise<TimedCronRunOutcome> => {
+      const { id, job } = params;
       const startedAt = state.deps.nowMs();
       job.state.runningAtMs = startedAt;
       emit(state, { jobId: job.id, action: "started", runAtMs: startedAt });
@@ -276,27 +289,49 @@ export async function onTimer(state: CronServiceState) {
                 }
               })()
             : await executeJobCore(state, job);
-        results.push({ jobId: id, ...result, startedAt, endedAt: state.deps.nowMs() });
+        return { jobId: id, ...result, startedAt, endedAt: state.deps.nowMs() };
       } catch (err) {
         state.deps.log.warn(
           { jobId: id, jobName: job.name, timeoutMs: jobTimeoutMs ?? null },
           `cron: job failed: ${String(err)}`,
         );
-        results.push({
+        return {
           jobId: id,
           status: "error",
           error: String(err),
           startedAt,
           endedAt: state.deps.nowMs(),
-        });
+        };
       }
-    }
+    };
 
-    if (results.length > 0) {
+    const concurrency = Math.min(resolveRunConcurrency(state), Math.max(1, dueJobs.length));
+    const results: (TimedCronRunOutcome | undefined)[] = Array.from({ length: dueJobs.length });
+    let cursor = 0;
+    const workers = Array.from({ length: concurrency }, async () => {
+      for (;;) {
+        const index = cursor++;
+        if (index >= dueJobs.length) {
+          return;
+        }
+        const due = dueJobs[index];
+        if (!due) {
+          return;
+        }
+        results[index] = await runDueJob(due);
+      }
+    });
+    await Promise.all(workers);
+
+    const completedResults: TimedCronRunOutcome[] = results.filter(
+      (entry): entry is TimedCronRunOutcome => entry !== undefined,
+    );
+
+    if (completedResults.length > 0) {
       await locked(state, async () => {
         await ensureLoaded(state, { forceReload: true, skipRecompute: true });
 
-        for (const result of results) {
+        for (const result of completedResults) {
           const job = state.store?.jobs.find((j) => j.id === result.jobId);
           if (!job) {
             continue;
@@ -305,6 +340,7 @@ export async function onTimer(state: CronServiceState) {
           const shouldDelete = applyJobResult(state, job, {
             status: result.status,
             error: result.error,
+            delivered: result.delivered,
             startedAt: result.startedAt,
             endedAt: result.endedAt,
           });
@@ -423,22 +459,97 @@ export async function runMissedJobs(
   state: CronServiceState,
   opts?: { skipJobIds?: ReadonlySet<string> },
 ) {
-  if (!state.store) {
-    return;
-  }
-  const now = state.deps.nowMs();
-  const skipJobIds = opts?.skipJobIds;
-  const missed = collectRunnableJobs(state, now, { skipJobIds, skipAtIfAlreadyRan: true });
-
-  if (missed.length > 0) {
+  const startupCandidates = await locked(state, async () => {
+    await ensureLoaded(state, { skipRecompute: true });
+    if (!state.store) {
+      return [] as Array<{ jobId: string; job: CronJob }>;
+    }
+    const now = state.deps.nowMs();
+    const skipJobIds = opts?.skipJobIds;
+    const missed = collectRunnableJobs(state, now, { skipJobIds, skipAtIfAlreadyRan: true });
+    if (missed.length === 0) {
+      return [] as Array<{ jobId: string; job: CronJob }>;
+    }
     state.deps.log.info(
       { count: missed.length, jobIds: missed.map((j) => j.id) },
       "cron: running missed jobs after restart",
     );
     for (const job of missed) {
-      await executeJob(state, job, now, { forced: false });
+      job.state.runningAtMs = now;
+      job.state.lastError = undefined;
+    }
+    await persist(state);
+    return missed.map((job) => ({ jobId: job.id, job }));
+  });
+
+  if (startupCandidates.length === 0) {
+    return;
+  }
+
+  const outcomes: Array<TimedCronRunOutcome> = [];
+  for (const candidate of startupCandidates) {
+    const startedAt = state.deps.nowMs();
+    emit(state, { jobId: candidate.job.id, action: "started", runAtMs: startedAt });
+    try {
+      const result = await executeJobCore(state, candidate.job);
+      outcomes.push({
+        jobId: candidate.jobId,
+        status: result.status,
+        error: result.error,
+        summary: result.summary,
+        delivered: result.delivered,
+        sessionId: result.sessionId,
+        sessionKey: result.sessionKey,
+        model: result.model,
+        provider: result.provider,
+        usage: result.usage,
+        startedAt,
+        endedAt: state.deps.nowMs(),
+      });
+    } catch (err) {
+      outcomes.push({
+        jobId: candidate.jobId,
+        status: "error",
+        error: String(err),
+        startedAt,
+        endedAt: state.deps.nowMs(),
+      });
     }
   }
+
+  await locked(state, async () => {
+    await ensureLoaded(state, { forceReload: true, skipRecompute: true });
+    if (!state.store) {
+      return;
+    }
+
+    for (const result of outcomes) {
+      const job = state.store.jobs.find((entry) => entry.id === result.jobId);
+      if (!job) {
+        continue;
+      }
+      const shouldDelete = applyJobResult(state, job, {
+        status: result.status,
+        error: result.error,
+        delivered: result.delivered,
+        startedAt: result.startedAt,
+        endedAt: result.endedAt,
+      });
+
+      emitJobFinished(state, job, result, result.startedAt);
+
+      if (shouldDelete) {
+        state.store.jobs = state.store.jobs.filter((entry) => entry.id !== job.id);
+        emit(state, { jobId: job.id, action: "removed" });
+      }
+    }
+
+    // Preserve any new past-due nextRunAtMs values that became due while
+    // startup catch-up was running. They should execute on a future tick
+    // instead of being silently advanced.
+    recomputeNextRunsForMaintenance(state);
+    await persist(state);
+  });
 }
 
 export async function runDueJobs(state: CronServiceState) {
@@ -455,48 +566,78 @@ export async function runDueJobs(state: CronServiceState) {
 async function executeJobCore(
   state: CronServiceState,
   job: CronJob,
-): Promise<CronRunOutcome & CronRunTelemetry> {
-  // Direct exec: run shell command without LLM
+): Promise<CronRunOutcome & CronRunTelemetry & { delivered?: boolean }> {
+  // Direct exec: run shell command without LLM.
+  // Requires cron.allowExec=true in config. Bypasses the session/LLM system
+  // entirely, providing reliable execution even when LLM providers are down.
   if (job.payload.kind === "exec") {
-    const { exec: execCb } = await import("node:child_process");
+    if (!state.deps.cronConfig?.allowExec) {
+      return {
+        status: "error",
+        error: "cron exec is disabled (set cron.allowExec=true to enable)",
+      };
+    }
+
     const command = job.payload.command;
     const cwd = job.payload.cwd || undefined;
     const timeoutMs = job.payload.timeoutMs || 60_000;
+    const maxBuffer = 1024 * 1024; // 1 MB
     const env = job.payload.env ? { ...process.env, ...job.payload.env } : undefined;
 
-    return new Promise<CronRunOutcome & CronRunTelemetry>((resolve) => {
+    state.deps.log.info(
+      { jobId: job.id, jobName: job.name, command, cwd, timeoutMs },
+      "cron: executing shell command",
+    );
+
+    return new Promise<CronRunOutcome & CronRunTelemetry & { delivered?: boolean }>((resolve) => {
       execCb(
         command,
-        {
-          cwd,
-          timeout: timeoutMs,
-          env,
-          encoding: "utf-8",
-          maxBuffer: 1024 * 1024,
-        },
+        { cwd, timeout: timeoutMs, env, encoding: "utf-8", maxBuffer },
         (err, stdout, stderr) => {
+          const stdoutStr = typeof stdout === "string" ? stdout.trim() : "";
+          const stderrStr = typeof stderr === "string" ? stderr.trim() : "";
+
           if (err) {
-            const stderrStr = stderr ? String(stderr).trim().slice(0, 1000) : "";
-            const stdoutStr = stdout ? String(stdout).trim().slice(0, 1000) : "";
-            const exitCode =
-              typeof (err as unknown as { code?: unknown }).code === "number"
-                ? (err as unknown as { code: number }).code
-                : null;
-            const errorMsg =
-              exitCode !== null
-                ? `exit code ${exitCode}${stderrStr ? `: ${stderrStr}` : ""}`
-                : String(err.message ?? err);
+            const signal = (err as { signal?: string }).signal;
+            const rawCode = (err as { code?: string | number }).code;
+            const exitCode = typeof rawCode === "number" ? rawCode : undefined;
+
+            let errorMsg: string;
+            if (signal) {
+              errorMsg = `killed by ${signal}`;
+            } else if (exitCode !== undefined) {
+              errorMsg = `exit ${exitCode}${stderrStr ? `: ${stderrStr.slice(0, 500)}` : ""}`;
+            } else {
+              errorMsg = String(err.message ?? err);
+            }
+
+            state.deps.log.warn(
+              {
+                jobId: job.id,
+                jobName: job.name,
+                exitCode: rawCode,
+                signal,
+                stderr: stderrStr.slice(0, 500),
+              },
+              `cron: exec failed: ${errorMsg}`,
+            );
+
             resolve({
               status: "error",
-              error: errorMsg,
-              summary: stdoutStr || stderrStr || errorMsg,
+              error: errorMsg.slice(0, 1000),
+              summary: (stdoutStr || stderrStr || errorMsg).slice(0, 2000),
             });
             return;
           }
-          const summary = typeof stdout === "string" ? stdout.trim().slice(0, 2000) : "";
+
+          state.deps.log.info(
+            { jobId: job.id, jobName: job.name, outputLen: stdoutStr.length },
+            "cron: exec completed",
+          );
+
           resolve({
             status: "ok",
-            summary: summary || "(exec completed with no output)",
+            summary: (stdoutStr || "(no output)").slice(0, 2000),
           });
         },
       );
@@ -607,6 +748,7 @@ async function executeJobCore(
     status: res.status,
     error: res.error,
     summary: res.summary,
+    delivered: res.delivered,
     sessionId: res.sessionId,
     sessionKey: res.sessionKey,
     model: res.model,
@@ -635,6 +777,7 @@ export async function executeJob(
 
   let coreResult: {
     status: CronRunStatus;
+    delivered?: boolean;
   } & CronRunOutcome &
     CronRunTelemetry;
   try {
@@ -647,6 +790,7 @@ export async function executeJob(
   const shouldDelete = applyJobResult(state, job, {
     status: coreResult.status,
     error: coreResult.error,
+    delivered: coreResult.delivered,
     startedAt,
     endedAt,
   });
@@ -664,6 +808,7 @@ function emitJobFinished(
   job: CronJob,
   result: {
     status: CronRunStatus;
+    delivered?: boolean;
   } & CronRunOutcome &
     CronRunTelemetry,
   runAtMs: number,
@@ -674,6 +819,7 @@ function emitJobFinished(
     status: result.status,
     error: result.error,
     summary: result.summary,
+    delivered: result.delivered,
     sessionId: result.sessionId,
     sessionKey: result.sessionKey,
     runAtMs,

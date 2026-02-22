@@ -76,7 +76,8 @@ function resolveEveryAnchorMs(params: {
 
 export function assertSupportedJobSpec(job: Pick<CronJob, "sessionTarget" | "payload">) {
   if (job.payload.kind === "exec") {
-    // exec payload is allowed with any sessionTarget (uses "isolated" by convention)
+    // exec payload is accepted here; the cron.allowExec runtime guard in
+    // executeJobCore rejects execution when the config flag is not set.
     return;
   }
   if (job.sessionTarget === "main" && job.payload.kind !== "systemEvent") {
