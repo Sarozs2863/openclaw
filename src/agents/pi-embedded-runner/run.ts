@@ -1085,16 +1085,25 @@ export async function runEmbeddedPiAgent(
           // Timeout aborts can leave the run without any assistant payloads.
           // Emit an explicit timeout error instead of silently completing, so
           // callers do not lose the turn as an orphaned user message.
-          if (timedOut && !timedOutDuringCompaction && payloads.length === 0) {
+          // When partial payloads exist, append the timeout notice so delivery
+          // channels that gate on `isError` (e.g. QQ bot suppress rules) still
+          // surface the timeout to the user.
+          if (timedOut && !timedOutDuringCompaction) {
+            const timeoutText =
+              payloads.length === 0
+                ? "Request timed out before a response was generated. " +
+                  "Please try again, or increase `agents.defaults.timeoutSeconds` in your config."
+                : "⚠️ Request timed out while processing. Partial work may have been completed.";
+            payloads.push({
+              text: timeoutText,
+              isError: true,
+            });
+          }
+
+          if (timedOut && !timedOutDuringCompaction && payloads.length === 1) {
+            // Only the timeout payload exists — return early with minimal meta.
             return {
-              payloads: [
-                {
-                  text:
-                    "Request timed out before a response was generated. " +
-                    "Please try again, or increase `agents.defaults.timeoutSeconds` in your config.",
-                  isError: true,
-                },
-              ],
+              payloads,
               meta: {
                 durationMs: Date.now() - started,
                 agentMeta,
