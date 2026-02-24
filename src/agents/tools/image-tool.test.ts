@@ -6,7 +6,13 @@ import type { OpenClawConfig } from "../../config/config.js";
 import type { ModelDefinitionConfig } from "../../config/types.models.js";
 import { withFetchPreconnect } from "../../test-utils/fetch-mock.js";
 import { createOpenClawCodingTools } from "../pi-tools.js";
-import { createHostSandboxFsBridge } from "../test-helpers/host-sandbox-fs-bridge.js";
+import type { SandboxContext } from "../sandbox.js";
+import type { SandboxFsBridge, SandboxResolvedPath } from "../sandbox/fs-bridge.js";
+import {
+  createHostSandboxFsBridge,
+  createSandboxFsBridgeFromResolver,
+} from "../test-helpers/host-sandbox-fs-bridge.js";
+import { createPiToolsSandboxContext } from "../test-helpers/pi-tools-sandbox-context.js";
 import { __testing, createImageTool, resolveImageModelConfigForTool } from "./image-tool.js";
 
 async function writeAuthProfiles(agentDir: string, profiles: unknown) {
@@ -46,6 +52,58 @@ async function withTempWorkspacePng(
   }
 }
 
+function createUnsafeMountedBridge(params: {
+  root: string;
+  agentHostRoot: string;
+  workspaceContainerRoot?: string;
+}): SandboxFsBridge {
+  const root = path.resolve(params.root);
+  const agentHostRoot = path.resolve(params.agentHostRoot);
+  const workspaceContainerRoot = params.workspaceContainerRoot ?? "/workspace";
+
+  const resolvePath = (filePath: string, cwd?: string): SandboxResolvedPath => {
+    const hostPath =
+      filePath === "/agent" || filePath === "/agent/" || filePath.startsWith("/agent/")
+        ? path.join(
+            agentHostRoot,
+            filePath === "/agent" || filePath === "/agent/" ? "" : filePath.slice("/agent/".length),
+          )
+        : path.isAbsolute(filePath)
+          ? filePath
+          : path.resolve(cwd ?? root, filePath);
+
+    const relFromRoot = path.relative(root, hostPath);
+    const relativePath =
+      relFromRoot && !relFromRoot.startsWith("..") && !path.isAbsolute(relFromRoot)
+        ? relFromRoot.split(path.sep).filter(Boolean).join(path.posix.sep)
+        : filePath.replace(/\\/g, "/");
+
+    const containerPath = filePath.startsWith("/")
+      ? filePath.replace(/\\/g, "/")
+      : relativePath
+        ? path.posix.join(workspaceContainerRoot, relativePath)
+        : workspaceContainerRoot;
+
+    return { hostPath, relativePath, containerPath };
+  };
+
+  return createSandboxFsBridgeFromResolver(resolvePath);
+}
+
+function createSandbox(params: {
+  sandboxRoot: string;
+  agentRoot: string;
+  fsBridge: SandboxFsBridge;
+}): SandboxContext {
+  return createPiToolsSandboxContext({
+    workspaceDir: params.sandboxRoot,
+    agentWorkspaceDir: params.agentRoot,
+    workspaceAccess: "rw",
+    fsBridge: params.fsBridge,
+    tools: { allow: [], deny: [] },
+  });
+}
+
 function stubMinimaxOkFetch() {
   const fetch = vi.fn().mockResolvedValue({
     ok: true,
@@ -59,6 +117,51 @@ function stubMinimaxOkFetch() {
   });
   global.fetch = withFetchPreconnect(fetch);
   vi.stubEnv("MINIMAX_API_KEY", "minimax-test");
+  return fetch;
+}
+
+function stubOpenAiCompletionsOkFetch(text = "ok") {
+  const fetch = vi.fn().mockResolvedValue(
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          const chunks = [
+            `data: ${JSON.stringify({
+              id: "chatcmpl-moonshot-test",
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: "kimi-k2.5",
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: "assistant", content: text },
+                  finish_reason: null,
+                },
+              ],
+            })}\n\n`,
+            `data: ${JSON.stringify({
+              id: "chatcmpl-moonshot-test",
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: "kimi-k2.5",
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            })}\n\n`,
+            "data: [DONE]\n\n",
+          ];
+          for (const chunk of chunks) {
+            controller.enqueue(encoder.encode(chunk));
+          }
+          controller.close();
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      },
+    ),
+  );
+  global.fetch = withFetchPreconnect(fetch);
   return fetch;
 }
 
@@ -270,6 +373,71 @@ describe("image tool implicit imageModel config", () => {
     });
   });
 
+  it("sends moonshot image requests with user+image payloads only", async () => {
+    await withTempAgentDir(async (agentDir) => {
+      vi.stubEnv("MOONSHOT_API_KEY", "moonshot-test");
+      const fetch = stubOpenAiCompletionsOkFetch("ok moonshot");
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            model: { primary: "moonshot/kimi-k2.5" },
+            imageModel: { primary: "moonshot/kimi-k2.5" },
+          },
+        },
+        models: {
+          providers: {
+            moonshot: {
+              api: "openai-completions",
+              baseUrl: "https://api.moonshot.ai/v1",
+              models: [makeModelDefinition("kimi-k2.5", ["text", "image"])],
+            },
+          },
+        },
+      };
+
+      const tool = requireImageTool(createImageTool({ config: cfg, agentDir }));
+      const result = await tool.execute("t1", {
+        prompt: "Describe this image in one word.",
+        image: `data:image/png;base64,${ONE_PIXEL_PNG_B64}`,
+      });
+
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const [url, init] = fetch.mock.calls[0] as [unknown, { body?: unknown }];
+      expect(String(url)).toBe("https://api.moonshot.ai/v1/chat/completions");
+      expect(typeof init?.body).toBe("string");
+      const bodyRaw = typeof init?.body === "string" ? init.body : "";
+      const payload = JSON.parse(bodyRaw) as {
+        messages?: Array<{
+          role?: string;
+          content?: Array<{
+            type?: string;
+            text?: string;
+            image_url?: { url?: string };
+          }>;
+        }>;
+      };
+
+      expect(payload.messages?.map((message) => message.role)).toEqual(["user"]);
+      const userContent = payload.messages?.[0]?.content ?? [];
+      expect(userContent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "text",
+            text: "Describe this image in one word.",
+          }),
+          expect.objectContaining({ type: "image_url" }),
+        ]),
+      );
+      expect(userContent.find((block) => block.type === "image_url")?.image_url?.url).toContain(
+        "data:image/png;base64,",
+      );
+      expect(bodyRaw).not.toContain('"role":"developer"');
+      expect(result.content).toEqual(
+        expect.arrayContaining([expect.objectContaining({ type: "text", text: "ok moonshot" })]),
+      );
+    });
+  });
+
   it("exposes an Anthropic-safe image schema without union keywords", async () => {
     const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-image-"));
     try {
@@ -391,6 +559,50 @@ describe("image tool implicit imageModel config", () => {
     await expect(tool.execute("t2", { image: "../escape.png" })).rejects.toThrow(
       /escapes sandbox root/i,
     );
+  });
+
+  it("applies tools.fs.workspaceOnly to image paths in sandbox mode", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-image-sandbox-"));
+    const agentDir = path.join(stateDir, "agent");
+    const sandboxRoot = path.join(stateDir, "sandbox");
+    await fs.mkdir(agentDir, { recursive: true });
+    await fs.mkdir(sandboxRoot, { recursive: true });
+    await fs.writeFile(path.join(agentDir, "secret.png"), Buffer.from(ONE_PIXEL_PNG_B64, "base64"));
+
+    const bridge = createUnsafeMountedBridge({ root: sandboxRoot, agentHostRoot: agentDir });
+    const sandbox = createSandbox({ sandboxRoot, agentRoot: agentDir, fsBridge: bridge });
+    const fetch = stubMinimaxOkFetch();
+    const cfg: OpenClawConfig = {
+      ...createMinimaxImageConfig(),
+      tools: { fs: { workspaceOnly: true } },
+    };
+
+    try {
+      const tools = createOpenClawCodingTools({
+        config: cfg,
+        agentDir,
+        sandbox,
+        workspaceDir: sandboxRoot,
+      });
+      const readTool = tools.find((candidate) => candidate.name === "read");
+      if (!readTool) {
+        throw new Error("expected read tool");
+      }
+      const imageTool = requireImageTool(tools.find((candidate) => candidate.name === "image"));
+
+      await expect(readTool.execute("t1", { path: "/agent/secret.png" })).rejects.toThrow(
+        /Path escapes sandbox root/i,
+      );
+      await expect(
+        imageTool.execute("t2", {
+          prompt: "Describe the image.",
+          image: "/agent/secret.png",
+        }),
+      ).rejects.toThrow(/Path escapes sandbox root/i);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("rewrites inbound absolute paths into sandbox media/inbound", async () => {
