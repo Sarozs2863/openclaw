@@ -1,4 +1,4 @@
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { exec as execCb } from "node:child_process";
 import type { HeartbeatRunResult } from "../../infra/heartbeat-wake.js";
 import { DEFAULT_AGENT_ID } from "../../routing/session-key.js";
 import { resolveCronDeliveryPlan } from "../delivery.js";
@@ -14,11 +14,9 @@ import {
   computeJobNextRunAtMs,
   nextWakeAtMs,
   recomputeNextRunsForMaintenance,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   resolveJobPayloadTextForMain,
 } from "./jobs.js";
 import { locked } from "./locked.js";
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import type { CronEvent, CronServiceState } from "./state.js";
 import { ensureLoaded, persist } from "./store.js";
 import { DEFAULT_JOB_TIMEOUT_MS, resolveCronJobTimeoutMs } from "./timeout-policy.js";
@@ -603,6 +601,8 @@ export async function executeJobCore(
 ): Promise<
   CronRunOutcome & CronRunTelemetry & { delivered?: boolean; deliveryAttempted?: boolean }
 > {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   // Direct exec: run shell command without LLM.
   // Requires cron.allowExec=true in config. Bypasses the session/LLM system
   // entirely, providing reliable execution even when LLM providers are down.
@@ -686,11 +686,287 @@ export async function executeJobCore(
       );
     });
   }
+
+  const resolveAbortError = () => ({
+    status: "error" as const,
+    error: timeoutErrorMessage(),
+  });
+  const waitWithAbort = async (ms: number) => {
+    if (!abortSignal) {
+      await new Promise<void>((resolve) => setTimeout(resolve, ms));
+      return;
+    }
+    if (abortSignal.aborted) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        abortSignal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        abortSignal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+    });
+  };
+
+  if (abortSignal?.aborted) {
+    return resolveAbortError();
+  }
+  if (job.sessionTarget === "main") {
+    const text = resolveJobPayloadTextForMain(job);
+    if (!text) {
+      const kind = job.payload.kind;
+      return {
+        status: "skipped",
+        error:
+          kind === "systemEvent"
+            ? "main job requires non-empty systemEvent text"
+            : 'main job requires payload.kind="systemEvent"',
+      };
+    }
+    // Preserve the job session namespace for main-target reminders so heartbeat
+    // routing can deliver follow-through in the originating channel/thread.
+    // Downstream gateway wiring canonicalizes/guards this key per agent.
+    const targetMainSessionKey = job.sessionKey;
+    state.deps.enqueueSystemEvent(text, {
+      agentId: job.agentId,
+      sessionKey: targetMainSessionKey,
+      contextKey: `cron:${job.id}`,
+    });
+    if (job.wakeMode === "now" && state.deps.runHeartbeatOnce) {
+      const reason = `cron:${job.id}`;
+      const maxWaitMs = state.deps.wakeNowHeartbeatBusyMaxWaitMs ?? 2 * 60_000;
+      const retryDelayMs = state.deps.wakeNowHeartbeatBusyRetryDelayMs ?? 250;
+      const waitStartedAt = state.deps.nowMs();
+
+      let heartbeatResult: HeartbeatRunResult;
+      for (;;) {
+        if (abortSignal?.aborted) {
+          return resolveAbortError();
+        }
+        heartbeatResult = await state.deps.runHeartbeatOnce({
+          reason,
+          agentId: job.agentId,
+          sessionKey: targetMainSessionKey,
+          // Cron-triggered heartbeats should deliver to the last active channel.
+          // Without this override, heartbeat target defaults to "none" (since
+          // e2362d35) and cron main-session responses are silently swallowed.
+          // See: https://github.com/openclaw/openclaw/issues/28508
+          heartbeat: { target: "last" },
+        });
+        if (
+          heartbeatResult.status !== "skipped" ||
+          heartbeatResult.reason !== "requests-in-flight"
+        ) {
+          break;
+        }
+        if (abortSignal?.aborted) {
+          return resolveAbortError();
+        }
+        if (state.deps.nowMs() - waitStartedAt > maxWaitMs) {
+          if (abortSignal?.aborted) {
+            return resolveAbortError();
+          }
+          state.deps.requestHeartbeatNow({
+            reason,
+            agentId: job.agentId,
+            sessionKey: targetMainSessionKey,
+          });
+          return { status: "ok", summary: text };
+        }
+        await waitWithAbort(retryDelayMs);
+      }
+
+      if (heartbeatResult.status === "ran") {
+        return { status: "ok", summary: text };
+      } else if (heartbeatResult.status === "skipped") {
+        return { status: "skipped", error: heartbeatResult.reason, summary: text };
+      } else {
+        return { status: "error", error: heartbeatResult.reason, summary: text };
+      }
+    } else {
+      if (abortSignal?.aborted) {
+        return resolveAbortError();
+      }
+      state.deps.requestHeartbeatNow({
+        reason: `cron:${job.id}`,
+        agentId: job.agentId,
+        sessionKey: targetMainSessionKey,
+      });
+      return { status: "ok", summary: text };
+    }
+  }
+
+  if (job.payload.kind !== "agentTurn") {
+    return { status: "skipped", error: "isolated job requires payload.kind=agentTurn" };
+  }
+  if (abortSignal?.aborted) {
+    return resolveAbortError();
+  }
+
+  const res = await state.deps.runIsolatedAgentJob({
+    job,
+    message: job.payload.message,
+    abortSignal,
+  });
+
+  if (abortSignal?.aborted) {
+    return { status: "error", error: timeoutErrorMessage() };
+  }
+
+  // Post a short summary back to the main session only when announce
+  // delivery was requested and we are confident no outbound delivery path
+  // ran. If delivery was attempted but final ack is uncertain, suppress the
+  // main summary to avoid duplicate user-facing sends.
+  // See: https://github.com/openclaw/openclaw/issues/15692
+  const summaryText = res.summary?.trim();
+  const deliveryPlan = resolveCronDeliveryPlan(job);
+  const suppressMainSummary =
+    res.status === "error" && res.errorKind === "delivery-target" && deliveryPlan.requested;
+  if (
+    summaryText &&
+    deliveryPlan.requested &&
+    !res.delivered &&
+    res.deliveryAttempted !== true &&
+    !suppressMainSummary
+  ) {
+    const prefix = "Cron";
+    const label =
+      res.status === "error" ? `${prefix} (error): ${summaryText}` : `${prefix}: ${summaryText}`;
+    state.deps.enqueueSystemEvent(label, {
+      agentId: job.agentId,
+      sessionKey: job.sessionKey,
+      contextKey: `cron:${job.id}`,
+    });
+    if (job.wakeMode === "now") {
+      state.deps.requestHeartbeatNow({
+        reason: `cron:${job.id}`,
+        agentId: job.agentId,
+        sessionKey: job.sessionKey,
+      });
+    }
+  }
+
+  return {
+    status: res.status,
+    error: res.error,
+    summary: res.summary,
+    delivered: res.delivered,
+    deliveryAttempted: res.deliveryAttempted,
+    sessionId: res.sessionId,
+    sessionKey: res.sessionKey,
+    model: res.model,
+    provider: res.provider,
+    usage: res.usage,
+  };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const resolveAbortError = () => ({
-  status: "error" as const,
-  error: timeoutErrorMessage(),
-  deliveryAttempted: false, // Default for abort error
-});
+/**
+ * Execute a job. This version is used by the `run` command and other
+ * places that need the full execution with state updates.
+ */
+export async function executeJob(
+  state: CronServiceState,
+  job: CronJob,
+  _nowMs: number,
+  _opts: { forced: boolean },
+) {
+  if (!job.state) {
+    job.state = {};
+  }
+  const startedAt = state.deps.nowMs();
+  job.state.runningAtMs = startedAt;
+  job.state.lastError = undefined;
+  emit(state, { jobId: job.id, action: "started", runAtMs: startedAt });
+
+  let coreResult: {
+    status: CronRunStatus;
+    delivered?: boolean;
+  } & CronRunOutcome &
+    CronRunTelemetry;
+  try {
+    coreResult = await executeJobCore(state, job);
+  } catch (err) {
+    coreResult = { status: "error", error: String(err) };
+  }
+
+  const endedAt = state.deps.nowMs();
+  const shouldDelete = applyJobResult(state, job, {
+    status: coreResult.status,
+    error: coreResult.error,
+    delivered: coreResult.delivered,
+    startedAt,
+    endedAt,
+  });
+
+  emitJobFinished(state, job, coreResult, startedAt);
+
+  if (shouldDelete && state.store) {
+    state.store.jobs = state.store.jobs.filter((j) => j.id !== job.id);
+    emit(state, { jobId: job.id, action: "removed" });
+  }
+}
+
+function emitJobFinished(
+  state: CronServiceState,
+  job: CronJob,
+  result: {
+    status: CronRunStatus;
+    delivered?: boolean;
+  } & CronRunOutcome &
+    CronRunTelemetry,
+  runAtMs: number,
+) {
+  emit(state, {
+    jobId: job.id,
+    action: "finished",
+    status: result.status,
+    error: result.error,
+    summary: result.summary,
+    delivered: result.delivered,
+    deliveryStatus: job.state.lastDeliveryStatus,
+    deliveryError: job.state.lastDeliveryError,
+    sessionId: result.sessionId,
+    sessionKey: result.sessionKey,
+    runAtMs,
+    durationMs: job.state.lastDurationMs,
+    nextRunAtMs: job.state.nextRunAtMs,
+    model: result.model,
+    provider: result.provider,
+    usage: result.usage,
+  });
+}
+
+export function wake(
+  state: CronServiceState,
+  opts: { mode: "now" | "next-heartbeat"; text: string },
+) {
+  const text = opts.text.trim();
+  if (!text) {
+    return { ok: false } as const;
+  }
+  state.deps.enqueueSystemEvent(text);
+  if (opts.mode === "now") {
+    state.deps.requestHeartbeatNow({ reason: "wake" });
+  }
+  return { ok: true } as const;
+}
+
+export function stopTimer(state: CronServiceState) {
+  if (state.timer) {
+    clearTimeout(state.timer);
+  }
+  state.timer = null;
+}
+
+export function emit(state: CronServiceState, evt: CronEvent) {
+  try {
+    state.deps.onEvent?.(evt);
+  } catch {
+    /* ignore */
+  }
+}
