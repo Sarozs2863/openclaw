@@ -497,23 +497,69 @@ function resolveWorkspaceSkillPromptState(
   const promptEntries = eligible.filter(
     (entry) => entry.invocation?.disableModelInvocation !== true,
   );
+
+  // Separate always-load skills from on-demand skills
+  const alwaysLoadEntries = promptEntries.filter((entry) => entry.metadata?.always === true);
+  const onDemandEntries = promptEntries.filter((entry) => entry.metadata?.always !== true);
+
   const remoteNote = opts?.eligibility?.remote?.note?.trim();
   const resolvedSkills = promptEntries.map((entry) => entry.skill);
+
+  // Build always-load skills section with full content
+  const alwaysLoadPrompt = buildAlwaysLoadSkillsPrompt(alwaysLoadEntries);
+
+  // Build on-demand skills section with descriptions only
+  const onDemandSkills = onDemandEntries.map((entry) => entry.skill);
   const { skillsForPrompt, truncated } = applySkillsPromptLimits({
-    skills: resolvedSkills,
+    skills: onDemandSkills,
     config: opts?.config,
   });
   const truncationNote = truncated
-    ? `⚠️ Skills truncated: included ${skillsForPrompt.length} of ${resolvedSkills.length}. Run \`openclaw skills check\` to audit.`
+    ? `⚠️ Skills truncated: included ${skillsForPrompt.length} of ${onDemandSkills.length}. Run \`openclaw skills check\` to audit.`
     : "";
-  const prompt = [
-    remoteNote,
-    truncationNote,
-    formatSkillsForPrompt(compactSkillPaths(skillsForPrompt)),
-  ]
+  const onDemandPrompt = formatSkillsForPrompt(compactSkillPaths(skillsForPrompt));
+
+  const prompt = [remoteNote, alwaysLoadPrompt, truncationNote, onDemandPrompt]
     .filter(Boolean)
     .join("\n");
   return { eligible, prompt, resolvedSkills };
+}
+
+function buildAlwaysLoadSkillsPrompt(entries: SkillEntry[]): string {
+  if (entries.length === 0) {
+    return "";
+  }
+
+  const sections: string[] = [];
+  sections.push("## Core Skills (always loaded)");
+  sections.push(
+    "The following skills are always available and their full content is included below:",
+  );
+  sections.push("");
+
+  for (const entry of entries) {
+    const skill = entry.skill;
+    sections.push(`### ${skill.name}`);
+    sections.push(`Location: ${skill.filePath}`);
+    sections.push("");
+
+    // Read the full SKILL.md content
+    try {
+      const content = fs.readFileSync(skill.filePath, "utf-8");
+      // Remove frontmatter if present
+      const withoutFrontmatter = content.replace(/^---\n[\s\S]*?\n---\n/, "");
+      sections.push(withoutFrontmatter.trim());
+    } catch (error) {
+      sections.push(
+        `⚠️ Failed to read skill content: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    sections.push("");
+    sections.push("---");
+    sections.push("");
+  }
+
+  return sections.join("\n");
 }
 
 export function resolveSkillsPromptForRun(params: {
