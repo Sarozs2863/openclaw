@@ -4,6 +4,7 @@ import { isCronSystemEvent } from "../../infra/heartbeat-events-filter.js";
 import type { HeartbeatRunResult } from "../../infra/heartbeat-wake.js";
 import { DEFAULT_AGENT_ID } from "../../routing/session-key.js";
 import { resolveCronDeliveryPlan } from "../delivery.js";
+import { shouldEnqueueCronMainSummary } from "../heartbeat-policy.js";
 import { sweepCronRunSessions } from "../session-reaper.js";
 import type {
   CronDeliveryStatus,
@@ -1083,12 +1084,14 @@ export async function executeJobCore(
   const suppressMainSummary =
     res.status === "error" && res.errorKind === "delivery-target" && deliveryPlan.requested;
   if (
-    summaryText &&
-    isCronSystemEvent(summaryText) &&
-    deliveryPlan.requested &&
-    !res.delivered &&
-    res.deliveryAttempted !== true &&
-    !suppressMainSummary
+    shouldEnqueueCronMainSummary({
+      summaryText,
+      deliveryRequested: deliveryPlan.requested,
+      delivered: res.delivered,
+      deliveryAttempted: res.deliveryAttempted,
+      suppressMainSummary,
+      isCronSystemEvent,
+    })
   ) {
     const prefix = "Cron";
     const label =
