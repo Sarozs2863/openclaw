@@ -4,6 +4,7 @@ import {
   shouldSuppressReasoningPayload,
 } from "../../auto-reply/reply/reply-payloads.js";
 import type { ReplyPayload } from "../../auto-reply/types.js";
+import { stripAssistantInternalScaffolding } from "../../shared/text/assistant-visible-text.js";
 
 export type NormalizedOutboundPayload = {
   text: string;
@@ -48,7 +49,8 @@ export function normalizeReplyPayloadsForDelivery(
     if (shouldSuppressReasoningPayload(payload)) {
       continue;
     }
-    const parsed = parseReplyDirectives(payload.text ?? "");
+    const sanitizedText = stripAssistantInternalScaffolding(payload.text ?? "");
+    const parsed = parseReplyDirectives(sanitizedText);
     const explicitMediaUrls = payload.mediaUrls ?? parsed.mediaUrls;
     const explicitMediaUrl = payload.mediaUrl ?? parsed.mediaUrl;
     const mergedMedia = mergeMediaUrls(
