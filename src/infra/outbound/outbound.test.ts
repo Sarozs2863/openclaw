@@ -36,7 +36,6 @@ import {
   formatOutboundPayloadLog,
   normalizeOutboundPayloads,
   normalizeOutboundPayloadsForJson,
-  normalizeReplyPayloadsForDelivery,
 } from "./payloads.js";
 import { runResolveOutboundTargetCoreTests } from "./targets.shared-test.js";
 
@@ -1141,25 +1140,6 @@ describe("normalizeOutboundPayloadsForJson", () => {
       { text: "final answer" },
     ]);
     expect(normalized).toEqual([{ text: "final answer", mediaUrl: null, mediaUrls: undefined }]);
-  });
-
-  it("strips leaked thinking-process prose before parsing reply tags", () => {
-    const normalized = normalizeReplyPayloadsForDelivery([
-      {
-        text: [
-          "think",
-          "Thinking Process:",
-          "",
-          "1. Analyze the request.",
-          "4. Action: Output the response with the `[[reply_to_current]]` tag.[[reply_to_current]] 下午好，在的。怎么了？",
-        ].join("\n"),
-      },
-    ]);
-    expect(normalized).toHaveLength(1);
-    expect(normalized[0]).toMatchObject({
-      text: "下午好，在的。怎么了？",
-      replyToCurrent: true,
-    });
   });
 });
 

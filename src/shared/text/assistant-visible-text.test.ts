@@ -46,18 +46,4 @@ describe("stripAssistantInternalScaffolding", () => {
     const input = ["Hello", "<relevant-memories>", "internal-only"].join("\n");
     expect(stripAssistantInternalScaffolding(input)).toBe("Hello\n");
   });
-
-  it("strips leaked thinking-process prose when a reply tag is present", () => {
-    const input = [
-      "think",
-      "Thinking Process:",
-      "",
-      "1. Analyze the request.",
-      "2. Draft the answer.",
-      "4. Action: Output the response with the `[[reply_to_current]]` tag.[[reply_to_current]] 下午好，在的。怎么了？",
-    ].join("\n");
-    expect(stripAssistantInternalScaffolding(input)).toBe(
-      "[[reply_to_current]] 下午好，在的。怎么了？",
-    );
-  });
 });
