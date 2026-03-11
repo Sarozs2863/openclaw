@@ -78,6 +78,10 @@ export type CronFailureAlert = {
   accountId?: string;
 };
 
+export type CronPayload = { kind: "systemEvent"; text: string } | CronAgentTurnPayload;
+
+export type CronPayloadPatch = { kind: "systemEvent"; text?: string } | CronAgentTurnPayloadPatch;
+
 type CronAgentTurnPayloadFields = {
   message: string;
   /** Optional model override (provider/model or alias). */
@@ -99,44 +103,9 @@ type CronAgentTurnPayload = {
   kind: "agentTurn";
 } & CronAgentTurnPayloadFields;
 
-type CronExecPayload = {
-  kind: "exec";
-  command: string;
-  cwd?: string;
-  timeoutMs?: number;
-  env?: Record<string, string>;
-};
-
-type CronExecPayloadPatch = {
-  kind: "exec";
-  command?: string;
-  cwd?: string;
-  timeoutMs?: number;
-  env?: Record<string, string>;
-};
-
-export type CronPayload =
-  | { kind: "systemEvent"; text: string }
-  | CronAgentTurnPayload
-  | CronExecPayload;
-
-export type CronPayloadPatch =
-  | { kind: "systemEvent"; text?: string }
-  | {
-      kind: "agentTurn";
-      message?: string;
-      model?: string;
-      fallbacks?: string[];
-      thinking?: string;
-      timeoutSeconds?: number;
-      allowUnsafeExternalContent?: boolean;
-      lightContext?: boolean;
-      deliver?: boolean;
-      channel?: CronMessageChannel;
-      to?: string;
-      bestEffortDeliver?: boolean;
-    }
-  | CronExecPayloadPatch;
+type CronAgentTurnPayloadPatch = {
+  kind: "agentTurn";
+} & Partial<CronAgentTurnPayloadFields>;
 export type CronJobState = {
   nextRunAtMs?: number;
   runningAtMs?: number;

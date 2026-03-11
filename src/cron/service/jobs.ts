@@ -132,11 +132,6 @@ function resolveEveryAnchorMs(params: {
 }
 
 export function assertSupportedJobSpec(job: Pick<CronJob, "sessionTarget" | "payload">) {
-  if (job.payload.kind === "exec") {
-    // exec payload is accepted here; the cron.allowExec runtime guard in
-    // executeJobCore rejects execution when the config flag is not set.
-    return;
-  }
   if (job.sessionTarget === "main" && job.payload.kind !== "systemEvent") {
     throw new Error('main cron jobs require payload.kind="systemEvent"');
   }
@@ -665,26 +660,6 @@ function mergeCronPayload(existing: CronPayload, patch: CronPayloadPatch): CronP
     return { kind: "systemEvent", text };
   }
 
-  if (patch.kind === "exec") {
-    if (existing.kind !== "exec") {
-      return buildPayloadFromPatch(patch);
-    }
-    const next: Extract<CronPayload, { kind: "exec" }> = { ...existing };
-    if (typeof patch.command === "string") {
-      next.command = patch.command;
-    }
-    if (patch.cwd !== undefined) {
-      next.cwd = patch.cwd;
-    }
-    if (patch.timeoutMs !== undefined) {
-      next.timeoutMs = patch.timeoutMs;
-    }
-    if (patch.env !== undefined) {
-      next.env = patch.env;
-    }
-    return next;
-  }
-
   if (existing.kind !== "agentTurn") {
     return buildPayloadFromPatch(patch);
   }
@@ -770,19 +745,6 @@ function buildPayloadFromPatch(patch: CronPayloadPatch): CronPayload {
       throw new Error('cron.update payload.kind="systemEvent" requires text');
     }
     return { kind: "systemEvent", text: patch.text };
-  }
-
-  if (patch.kind === "exec") {
-    if (typeof patch.command !== "string" || patch.command.length === 0) {
-      throw new Error('cron.update payload.kind="exec" requires command');
-    }
-    return {
-      kind: "exec",
-      command: patch.command,
-      cwd: patch.cwd,
-      timeoutMs: patch.timeoutMs,
-      env: patch.env,
-    };
   }
 
   if (typeof patch.message !== "string" || patch.message.length === 0) {

@@ -1,4 +1,3 @@
-import { exec as execCb } from "node:child_process";
 import { resolveFailoverReasonFromError } from "../../agents/failover-error.js";
 import type { CronConfig, CronRetryOn } from "../../config/types.cron.js";
 import type { HeartbeatRunResult } from "../../infra/heartbeat-wake.js";
@@ -1006,97 +1005,10 @@ export async function runDueJobs(state: CronServiceState) {
 export async function executeJobCore(
   state: CronServiceState,
   job: CronJob,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   abortSignal?: AbortSignal,
 ): Promise<
   CronRunOutcome & CronRunTelemetry & { delivered?: boolean; deliveryAttempted?: boolean }
 > {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-
-  // Direct exec: run shell command without LLM.
-  // Requires cron.allowExec=true in config. Bypasses the session/LLM system
-  // entirely, providing reliable execution even when LLM providers are down.
-  if (job.payload.kind === "exec") {
-    if (!state.deps.cronConfig?.allowExec) {
-      return {
-        status: "error",
-        error: "cron exec is disabled (set cron.allowExec=true to enable)",
-        deliveryAttempted: false, // Add this for consistency
-      };
-    }
-
-    const command = job.payload.command;
-    const cwd = job.payload.cwd || undefined;
-    const timeoutMs = job.payload.timeoutMs || 60_000;
-    const maxBuffer = 1024 * 1024; // 1 MB
-    const env = job.payload.env ? { ...process.env, ...job.payload.env } : undefined;
-
-    state.deps.log.info(
-      { jobId: job.id, jobName: job.name, command, cwd, timeoutMs },
-      "cron: executing shell command",
-    );
-
-    return new Promise<
-      CronRunOutcome & CronRunTelemetry & { delivered?: boolean; deliveryAttempted?: boolean }
-    >((resolve) => {
-      execCb(
-        command,
-        { cwd, timeout: timeoutMs, env, encoding: "utf-8", maxBuffer },
-        (err, stdout, stderr) => {
-          const stdoutStr = typeof stdout === "string" ? stdout.trim() : "";
-          const stderrStr = typeof stderr === "string" ? stderr.trim() : "";
-
-          if (err) {
-            const signal = (err as { signal?: string }).signal;
-            const rawCode = (err as { code?: string | number }).code;
-            const exitCode = typeof rawCode === "number" ? rawCode : undefined;
-
-            let errorMsg: string;
-            if (signal) {
-              errorMsg = `killed by ${signal}`;
-            } else if (exitCode !== undefined) {
-              errorMsg = `exit ${exitCode}${stderrStr ? `: ${stderrStr.slice(0, 500)}` : ""}`;
-            } else {
-              errorMsg = String(err.message ?? err);
-            }
-
-            state.deps.log.warn(
-              {
-                jobId: job.id,
-                jobName: job.name,
-                exitCode: rawCode,
-                signal,
-                stderr: stderrStr.slice(0, 500),
-              },
-              `cron: exec failed: ${errorMsg}`,
-            );
-
-            resolve({
-              status: "error",
-              error: errorMsg.slice(0, 1000),
-              summary: (stdoutStr || stderrStr || errorMsg).slice(0, 2000),
-              delivered: false, // explicitly false for exec
-              deliveryAttempted: false, // explicitly false for exec
-            });
-            return;
-          }
-
-          state.deps.log.info(
-            { jobId: job.id, jobName: job.name, outputLen: stdoutStr.length },
-            "cron: exec completed",
-          );
-
-          resolve({
-            status: "ok",
-            summary: (stdoutStr || "(no output)").slice(0, 2000),
-            delivered: false, // explicitly false for exec
-            deliveryAttempted: false, // explicitly false for exec
-          });
-        },
-      );
-    });
-  }
-
   const resolveAbortError = () => ({
     status: "error" as const,
     error: timeoutErrorMessage(),
