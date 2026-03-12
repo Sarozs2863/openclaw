@@ -49,7 +49,6 @@ export function registerCronEditCommand(cron: Command) {
       .option("--exact", "Disable cron staggering (set stagger to 0)")
       .option("--system-event <text>", "Set systemEvent payload")
       .option("--message <text>", "Set agentTurn payload message")
-      .option("--exec <command>", "Set exec payload (direct shell command, no LLM)")
       .option("--thinking <level>", "Thinking level for agent jobs")
       .option("--model <model>", "Model override for agent jobs")
       .option("--timeout-seconds <n>", "Timeout seconds for agent jobs")
@@ -204,7 +203,6 @@ export function registerCronEditCommand(cron: Command) {
           }
 
           const hasSystemEventPatch = typeof opts.systemEvent === "string";
-          const hasExecPatch = typeof opts.exec === "string";
           const model =
             typeof opts.model === "string" && opts.model.trim() ? opts.model.trim() : undefined;
           const thinking =
@@ -232,15 +230,7 @@ export function registerCronEditCommand(cron: Command) {
           if (hasSystemEventPatch && hasAgentTurnPatch) {
             throw new Error("Choose at most one payload change");
           }
-          if (hasExecPatch && (hasSystemEventPatch || hasAgentTurnPatch)) {
-            throw new Error("Choose at most one payload change");
-          }
-          if (hasExecPatch) {
-            patch.payload = {
-              kind: "exec",
-              command: String(opts.exec),
-            };
-          } else if (hasSystemEventPatch) {
+          if (hasSystemEventPatch) {
             patch.payload = {
               kind: "systemEvent",
               text: String(opts.systemEvent),

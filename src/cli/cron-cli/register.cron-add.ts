@@ -81,7 +81,6 @@ export function registerCronAddCommand(cron: Command) {
       .option("--exact", "Disable cron staggering (set stagger to 0)", false)
       .option("--system-event <text>", "System event payload (main session)")
       .option("--message <text>", "Agent message payload")
-      .option("--exec <command>", "Shell command to execute directly (no LLM)")
       .option("--thinking <level>", "Thinking level for agent jobs (off|minimal|low|medium|high)")
       .option("--model <model>", "Model override for agent jobs (provider/model or alias)")
       .option("--timeout-seconds <n>", "Timeout seconds for agent jobs")
@@ -160,15 +159,9 @@ export function registerCronAddCommand(cron: Command) {
           const payload = (() => {
             const systemEvent = typeof opts.systemEvent === "string" ? opts.systemEvent.trim() : "";
             const message = typeof opts.message === "string" ? opts.message.trim() : "";
-            const execCmd = typeof opts.exec === "string" ? opts.exec.trim() : "";
-            const chosen = [Boolean(systemEvent), Boolean(message), Boolean(execCmd)].filter(
-              Boolean,
-            ).length;
+            const chosen = [Boolean(systemEvent), Boolean(message)].filter(Boolean).length;
             if (chosen !== 1) {
-              throw new Error("Choose exactly one payload: --system-event, --message, or --exec");
-            }
-            if (execCmd) {
-              return { kind: "exec" as const, command: execCmd };
+              throw new Error("Choose exactly one payload: --system-event or --message");
             }
             if (systemEvent) {
               return { kind: "systemEvent" as const, text: systemEvent };
@@ -209,17 +202,12 @@ export function registerCronAddCommand(cron: Command) {
           if (sessionTarget === "main" && payload.kind !== "systemEvent") {
             throw new Error("Main jobs require --system-event (systemEvent).");
           }
-          if (
-            sessionTarget === "isolated" &&
-            payload.kind !== "agentTurn" &&
-            payload.kind !== "exec"
-          ) {
-            throw new Error("Isolated jobs require --message (agentTurn) or --exec.");
+          if (sessionTarget === "isolated" && payload.kind !== "agentTurn") {
+            throw new Error("Isolated jobs require --message (agentTurn).");
           }
           if (
             (opts.announce || typeof opts.deliver === "boolean") &&
-            (sessionTarget !== "isolated" ||
-              (payload.kind !== "agentTurn" && payload.kind !== "exec"))
+            (sessionTarget !== "isolated" || payload.kind !== "agentTurn")
           ) {
             throw new Error("--announce/--no-deliver require --session isolated.");
           }
@@ -234,8 +222,7 @@ export function registerCronAddCommand(cron: Command) {
           }
 
           const deliveryMode =
-            sessionTarget === "isolated" &&
-            (payload.kind === "agentTurn" || payload.kind === "exec")
+            sessionTarget === "isolated" && payload.kind === "agentTurn"
               ? hasAnnounce
                 ? "announce"
                 : hasNoDeliver
