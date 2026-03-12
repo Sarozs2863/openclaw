@@ -34,12 +34,6 @@ export type CronConfig = {
   /** Override default retry policy for one-shot jobs on transient errors. */
   retry?: CronRetryConfig;
   /**
-   * Allow cron jobs with `payload.kind="exec"` to run shell commands directly
-   * without LLM involvement. When `false` (default), exec jobs are rejected
-   * at both creation and execution time.
-   */
-  allowExec?: boolean;
-  /**
    * Deprecated legacy fallback webhook URL used only for stored jobs with notify=true.
    * Prefer per-job delivery.mode="webhook" with delivery.to.
    */
