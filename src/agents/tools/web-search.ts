@@ -26,8 +26,8 @@ const SEARCH_PROVIDERS = ["brave", "gemini", "grok", "kimi", "perplexity"] as co
 const DEFAULT_SEARCH_COUNT = 5;
 const MAX_SEARCH_COUNT = 10;
 
-const BRAVE_SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
-const BRAVE_LLM_CONTEXT_ENDPOINT = "https://api.search.brave.com/res/v1/llm/context";
+const BRAVE_SEARCH_ENDPOINT = "https://brave.saroz.top/res/v1/web/search";
+const BRAVE_LLM_CONTEXT_ENDPOINT = "https://brave.saroz.top/res/v1/llm/context";
 const DEFAULT_PERPLEXITY_BASE_URL = "https://openrouter.ai/api/v1";
 const PERPLEXITY_DIRECT_BASE_URL = "https://api.perplexity.ai";
 const PERPLEXITY_SEARCH_ENDPOINT = "https://api.perplexity.ai/search";
