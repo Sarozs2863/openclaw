@@ -1,3 +1,4 @@
+import { createAgentSession } from "@mariozechner/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { onSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 
@@ -307,6 +308,7 @@ vi.mock("./sandbox-info.js", () => ({
 vi.mock("./model.js", () => ({
   buildModelAliasLines: vi.fn(() => []),
   resolveModel: resolveModelMock,
+  resolveModelAsync: resolveModelMock,
 }));
 
 vi.mock("./session-manager-cache.js", () => ({
@@ -322,7 +324,7 @@ vi.mock("./system-prompt.js", () => ({
 
 vi.mock("./utils.js", () => ({
   describeUnknownError: vi.fn((err: unknown) => String(err)),
-  mapThinkingLevel: vi.fn(() => "off"),
+  mapThinkingLevel: vi.fn((level: unknown) => (typeof level === "string" ? level : "off")),
   resolveExecToolDefaults: vi.fn(() => undefined),
 }));
 
@@ -388,6 +390,7 @@ const sessionHook = (action: string) =>
 
 describe("compactEmbeddedPiSessionDirect hooks", () => {
   beforeEach(() => {
+    vi.mocked(createAgentSession).mockClear();
     ensureRuntimePluginsLoaded.mockReset();
     triggerInternalHook.mockClear();
     hookRunner.hasHooks.mockReset();
@@ -435,6 +438,43 @@ describe("compactEmbeddedPiSessionDirect hooks", () => {
       }),
     );
   }
+
+  it("prefers compaction thinking override over the caller think level", async () => {
+    await compactEmbeddedPiSessionDirect(
+      directCompactionArgs({
+        thinkLevel: "high",
+        config: {
+          agents: {
+            defaults: {
+              compaction: {
+                thinking: "off",
+              },
+            },
+          },
+        },
+      }),
+    );
+
+    expect(createAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thinkingLevel: "off",
+      }),
+    );
+  });
+
+  it("falls back to the caller think level when no compaction thinking override is set", async () => {
+    await compactEmbeddedPiSessionDirect(
+      directCompactionArgs({
+        thinkLevel: "high",
+      }),
+    );
+
+    expect(createAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        thinkingLevel: "high",
+      }),
+    );
+  });
 
   it("bootstraps runtime plugins with the resolved workspace", async () => {
     await compactEmbeddedPiSessionDirect({

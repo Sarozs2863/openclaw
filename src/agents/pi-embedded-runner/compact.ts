@@ -168,6 +168,13 @@ function normalizeObservedTokenCount(value: unknown): number | undefined {
     : undefined;
 }
 
+function resolveCompactionThinkLevel(params: {
+  config?: OpenClawConfig;
+  thinkLevel?: ThinkLevel;
+}): ThinkLevel | undefined {
+  return params.config?.agents?.defaults?.compaction?.thinking ?? params.thinkLevel;
+}
+
 function getMessageTextChars(msg: AgentMessage): number {
   const content = (msg as { content?: unknown }).content;
   if (typeof content === "string") {
@@ -745,13 +752,15 @@ export async function compactEmbeddedPiSessionDirect(
         sandboxEnabled: !!sandbox?.enabled,
       });
 
+      const compactionThinkLevel = resolveCompactionThinkLevel(params);
+      const mappedCompactionThinkingLevel = mapThinkingLevel(compactionThinkLevel);
       const { session } = await createAgentSession({
         cwd: effectiveWorkspace,
         agentDir,
         authStorage,
         modelRegistry,
         model: effectiveModel,
-        thinkingLevel: mapThinkingLevel(params.thinkLevel),
+        thinkingLevel: mappedCompactionThinkingLevel,
         tools: builtInTools,
         customTools,
         sessionManager,

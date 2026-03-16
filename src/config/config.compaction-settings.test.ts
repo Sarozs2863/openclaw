@@ -90,6 +90,24 @@ describe("config compaction settings", () => {
     );
   });
 
+  it("preserves compaction thinking override values", async () => {
+    await withTempHomeConfig(
+      {
+        agents: {
+          defaults: {
+            compaction: {
+              thinking: "off",
+            },
+          },
+        },
+      },
+      async () => {
+        const cfg = loadConfig();
+        expect(cfg.agents?.defaults?.compaction?.thinking).toBe("off");
+      },
+    );
+  });
+
   it("preserves recent turn safeguard values through loadConfig()", async () => {
     await withTempHomeConfig(
       {

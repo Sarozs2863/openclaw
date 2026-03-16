@@ -1,3 +1,4 @@
+import type { ThinkLevel } from "../auto-reply/thinking.js";
 import type { ChannelId } from "../channels/plugins/types.js";
 import type { AgentModelConfig, AgentSandboxConfig } from "./types.agents-shared.js";
 import type {
@@ -338,6 +339,8 @@ export type AgentCompactionConfig = {
    * When set, compaction uses this model instead of the agent's primary model.
    * Falls back to the primary model when unset. */
   model?: string;
+  /** Optional thinking override used only for compaction summarization. Falls back to the caller think level when unset. */
+  thinking?: ThinkLevel;
   /** Maximum time in seconds for a single compaction operation (default: 900). */
   timeoutSeconds?: number;
 };
